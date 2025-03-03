@@ -1,0 +1,153 @@
+---
+title: "Week 06 - Genetic Algorithm Assignment"
+author: "Srija Velumula"
+date: "2025-03-02"
+output: html_document
+---
+
+```{r}
+library(data.table)
+library(geosphere)
+library(GA)
+library(purrr)
+library(sf)
+
+## Load the population data
+pop.data <- data.table::fread("Mo_pop_Sim.csv")
+str(pop.data)
+frac <- 0.0001
+small.data <- pop.data[sample(1:nrow(pop.data),
+                               size = round(nrow(pop.data) * frac),
+                               replace = F), ## extract a sample of randomlychosen 1% rows
+                        ]  ## and choose all columns
+
+## Load the FQHC data
+data_path <- 'MO_2018_Federally_Qualified_Health_Center_Locations'
+fqhc.data <- data.table(as.data.frame(st_read(data_path,
+                     'MO_2018_Federally_Qualified_Health_Center_Locations')))
+names(fqhc.data)
+```
+
+
+```{r}
+# Extracting coordinates for both datasets
+fqhc_coords <- fqhc.data[, .(id = 1:nrow(fqhc.data), 
+                            long = Longitude, 
+                            lat = Latitude)]
+pop_coords <- small.data[, .(long, lat)]
+```
+
+#Approach 1: Average distance to population
+```{r}
+calculate_avg_distance <- function(fqhc_idx) {
+  fqhc_point <- fqhc_coords[id == fqhc_idx, .(long, lat)]
+  
+  # Calculate distances using distHaversine (in meters)
+  distances <- distHaversine(
+    p1 = as.matrix(pop_coords),
+    p2 = as.matrix(fqhc_point)
+  )
+
+  return(mean(distances) / 1609.34)
+}
+
+fqhc_coords[, avg_distance := sapply(id, calculate_avg_distance)]
+fqhc_distance_ranked <- fqhc_coords[order(avg_distance)]
+top_by_distance <- fqhc_distance_ranked[1:8]
+print(top_by_distance[, .(id, long, lat, avg_distance)])
+```
+
+
+#Approach 2: Population density within 30 miles
+
+```{r}
+count_pop_within_radius <- function(fqhc_idx, radius_miles = 30) {
+  fqhc_point <- fqhc_coords[id == fqhc_idx, .(long, lat)]
+  radius_meters <- radius_miles * 1609.34
+
+  distances <- distHaversine(
+    p1 = as.matrix(pop_coords),
+    p2 = as.matrix(fqhc_point)
+  )
+
+  return(sum(distances <= radius_meters))
+}
+
+fqhc_coords[, pop_count := sapply(id, count_pop_within_radius)]
+
+fqhc_density_ranked <- fqhc_coords[order(-pop_count)]
+top_by_density <- fqhc_density_ranked[1:8]
+print(top_by_density[, .(id, long, lat, pop_count)])
+```
+
+
+#Combined approach
+```{r}
+fqhc_coords[, norm_distance := 1 - (avg_distance - min(avg_distance)) / 
+              (max(avg_distance) - min(avg_distance))]
+fqhc_coords[, norm_pop_count := (pop_count - min(pop_count)) / 
+              (max(pop_count) - min(pop_count))]
+
+# Create a composite score (equal weights)
+fqhc_coords[, composite_score := 0.5 * norm_distance + 0.5 * norm_pop_count]
+
+# Sort by composite score (descending)
+fqhc_combined_ranked <- fqhc_coords[order(-composite_score)]
+top_by_composite <- fqhc_combined_ranked[1:8]
+print(top_by_composite[, .(id, long, lat, composite_score)])
+```
+
+```{r}
+# Function to calculate population within 30 miles
+evaluate_fitness <- function(indices) {
+  total_population <- 0
+  radius_meters <- 30 * 1609.34
+  
+  for (idx in indices) {
+    fqhc_point <- fqhc_coords[id == idx, .(long, lat)]
+    distances <- distHaversine(as.matrix(pop_coords), as.matrix(fqhc_point))
+    total_population <- total_population + sum(distances <= radius_meters)
+  }
+  
+  return(total_population)
+}
+
+# Fitness function wrapper
+fitness_function <- function(x) {
+  selected_indices <- as.integer(x)
+  return(evaluate_fitness(selected_indices))
+}
+
+# Run Genetic Algorithm
+ga_result <- ga(
+  type = "permutation", 
+  fitness = fitness_function, 
+  lower = 1, upper = nrow(fqhc_coords),
+  popSize = 50, 
+  maxiter = 10, 
+  run = 20, 
+  pmutation = 0.2,
+  parallel = FALSE,
+  monitor = TRUE,
+  elitism = 2
+)
+
+# Best solution
+best_solution <- ga_result@solution[1, ]
+selected_fqhc <- fqhc_coords[id %in% best_solution, ]
+print(selected_fqhc)
+```
+
+
+
+#I would use population density counting of residents across 30 miles as the main strategy to determine FQHC mental health service locations. The chosen method directly fulfills the purpose of extending specialized care access to the most patients because regular mental health visits are crucial for proper treatment of conditions.
+
+#I need to accept several important conditions in order to calculate fitness levels using population density metrics. A 30-mile radius establishes a suitable threshold for mental health service access according to my assumption as it sets the catchment regions for all facilities. The specified population within the defined 30-mile radius has identical chances for requiring and using the provided services. The FQHC locations share equivalent available resources which allow each one to treat patients with comparable volumes. The sample population data contains several demographic proportions that mirror the actual state-wide population of Missouri both with and without mental health needs.
+
+#In this approach the fitness function establishes resident population numbers counting from each possible FQHC site within thirty miles of their location. Total Population within 30-Miles Radius represents the maximum value since our mission aims to establish mental health service centers at locations where the most residents can benefit. Mathematically the fitness measurement for each future FQHC location i is defined as the count of local residents found within thirty miles circumference of that site. The selected set of eight locations should consist of those positions yielding maximum fitness ratings each individually.
+
+#The healthcare resource allocation strategy follows a utilitarian approach by placing services at locations which will impact the largest number of people. Apart from addressing equity issues, this system achieves the best possible results for population coverage using available resources with eight locations. High-density areas become optimal to place mental health services because specialized staff can serve more patients and establish broader treatment capabilities.
+
+#Additional detailed decision-making requires more sophisticated modifications to this baseline fitness metric through inclusion of conditions such as present mental health service provision levels and social economic status indices and travel connection standards. The population density method stands as a reliable starting point to determine locations which enable the maximum extension of healthcare services.
+
+
